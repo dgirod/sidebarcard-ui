@@ -6,8 +6,8 @@
 //  Added: Visual UI Editor (getConfigElement)
 // ------------------------------------------------------------------------------------------
 
-const SIDEBAR_CARD_TITLE = 'SIDEBAR-CARD';
-const SIDEBAR_CARD_VERSION = '1.0.0-ui';
+const SIDEBAR_CARD_TITLE = 'SIDEBAR-CARD-UI';
+const SIDEBAR_CARD_VERSION = '1.0.0';
 
 // ##########################################################################################
 // ###   Imports
@@ -56,7 +56,7 @@ class SidebarCard extends LitElement {
   // --- UI Editor integration ---
 
   static getConfigElement() {
-    return document.createElement('sidebar-card-editor');
+    return document.createElement('sidebar-card-ui-editor');
   }
 
   static getStubConfig() {
@@ -702,7 +702,7 @@ class SidebarCard extends LitElement {
   }
 }
 
-customElements.define('sidebar-card', SidebarCard);
+customElements.define('sidebar-card-ui', SidebarCard);
 
 // ##########################################################################################
 // ###   Visual UI Editor
@@ -1219,7 +1219,7 @@ class SidebarCardEditor extends LitElement {
   }
 }
 
-customElements.define('sidebar-card-editor', SidebarCardEditor);
+customElements.define('sidebar-card-ui-editor', SidebarCardEditor);
 
 // ##########################################################################################
 // ###   CSS Helper: Responsive sidebar layout
@@ -1479,7 +1479,7 @@ function watchLocationChange() {
 }
 
 async function buildCard(sidebar: any, config: any) {
-  const sidebarCard = document.createElement('sidebar-card') as any;
+  const sidebarCard = document.createElement('sidebar-card-ui') as any;
   sidebarCard.setConfig(config);
   sidebarCard.hass = hass();
   sidebar.appendChild(sidebarCard);
