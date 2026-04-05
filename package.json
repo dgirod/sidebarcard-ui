@@ -1,6 +1,7 @@
 {
   "name": "sidebar-card",
   "version": "1.0.0",
+  "homepage": "https://github.com/dgirod/sidebarcard",
   "description": "Home Assistant Sidebar Card with visual UI editor",
   "main": "dist/sidebar-card.js",
   "scripts": {
