@@ -2,5 +2,5 @@
   "name": "Sidebar Card",
   "content_in_root": false,
   "render_readme": true,
-  "filename": "sidebar-card.js"
+  "filename": "sidebar-card-ui.js"
 }
