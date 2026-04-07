@@ -1505,6 +1505,204 @@ function createElementFromHTML(htmlString: string) {
 }
 
 // ##########################################################################################
+// ###   Edit Mode – Inline Editor Button & Dialog
+// ##########################################################################################
+
+function isEditMode(): boolean {
+  return window.location.search.includes('edit=1');
+}
+
+function watchEditMode(sidebarConfig: any, sidebar: HTMLElement): void {
+  const handler = () => {
+    if (isEditMode()) {
+      createEditButton(sidebarConfig, sidebar);
+    } else {
+      removeEditButton(sidebar);
+    }
+  };
+  window.addEventListener('location-changed', handler);
+  window.addEventListener('popstate', handler);
+  // Deferred initial check: HA may fire location-changed before this listener
+  // is registered, so we also check once the event loop is free.
+  setTimeout(handler, 0);
+}
+
+function createEditButton(sidebarConfig: any, sidebar: HTMLElement): void {
+  if (sidebar.querySelector('#sidebarEditBtn')) return;
+
+  const btn = document.createElement('button');
+  btn.id = 'sidebarEditBtn';
+  btn.title = 'Sidebar bearbeiten';
+  btn.innerHTML = `<ha-icon icon="mdi:pencil" style="--mdc-icon-size:18px;"></ha-icon>`;
+  btn.style.cssText = `
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 999;
+    background: var(--primary-color, #03a9f4);
+    border: none;
+    border-radius: 50%;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: white;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+    padding: 0;
+  `;
+  btn.addEventListener('click', () => openSidebarEditor(sidebarConfig));
+  sidebar.appendChild(btn);
+}
+
+function removeEditButton(sidebar: HTMLElement): void {
+  const btn = sidebar.querySelector('#sidebarEditBtn');
+  if (btn) btn.remove();
+}
+
+async function openSidebarEditor(currentConfig: any): Promise<void> {
+  const lovelace = getLovelace();
+  if (!lovelace) return;
+
+  // Backdrop
+  const overlay = document.createElement('div');
+  overlay.id = 'sidebarEditorOverlay';
+  overlay.style.cssText = `
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  `;
+
+  // Panel
+  const panel = document.createElement('div');
+  panel.style.cssText = `
+    background: var(--card-background-color, #1c1c1e);
+    border-radius: 12px;
+    padding: 0;
+    width: 90%;
+    max-width: 560px;
+    max-height: 85vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  `;
+
+  // Header
+  const header = document.createElement('div');
+  header.style.cssText = `
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--divider-color, rgba(255,255,255,0.12));
+    flex-shrink: 0;
+  `;
+  const titleEl = document.createElement('span');
+  titleEl.textContent = 'Sidebar bearbeiten';
+  titleEl.style.cssText = `font-size: 18px; font-weight: 500; color: var(--primary-text-color);`;
+
+  const closeBtn = document.createElement('button');
+  closeBtn.innerHTML = `<ha-icon icon="mdi:close" style="--mdc-icon-size:20px;"></ha-icon>`;
+  closeBtn.style.cssText = `background:none;border:none;cursor:pointer;color:var(--secondary-text-color);padding:4px;display:flex;`;
+  closeBtn.addEventListener('click', () => overlay.remove());
+
+  header.appendChild(titleEl);
+  header.appendChild(closeBtn);
+
+  // Editor body (scrollable)
+  const body = document.createElement('div');
+  body.style.cssText = `padding: 16px 20px; overflow-y: auto; flex: 1;`;
+
+  const editor = document.createElement('sidebar-card-ui-editor') as any;
+  editor.hass = hass();
+  editor.setConfig({ ...currentConfig });
+
+  let latestConfig = { ...currentConfig };
+  editor.addEventListener('config-changed', (e: CustomEvent) => {
+    e.stopPropagation();
+    latestConfig = { ...e.detail.config };
+  });
+
+  body.appendChild(editor);
+
+  // Footer actions
+  const footer = document.createElement('div');
+  footer.style.cssText = `
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 20px;
+    border-top: 1px solid var(--divider-color, rgba(255,255,255,0.12));
+    flex-shrink: 0;
+  `;
+
+  const cancelBtn = document.createElement('mwc-button') as any;
+  cancelBtn.textContent = 'Abbrechen';
+  cancelBtn.addEventListener('click', () => overlay.remove());
+
+  const saveBtn = document.createElement('mwc-button') as any;
+  saveBtn.raised = true;
+  saveBtn.textContent = 'Speichern';
+  saveBtn.addEventListener('click', async () => {
+    try {
+      const fullConfig = JSON.parse(JSON.stringify(lovelace.config));
+      fullConfig.sidebar = latestConfig;
+      await lovelace.saveConfig(fullConfig);
+      overlay.remove();
+      showSidebarToast('Sidebar gespeichert ✓');
+    } catch (err) {
+      console.error('sidebar-card: save failed', err);
+      showSidebarToast('Fehler beim Speichern!');
+    }
+  });
+
+  footer.appendChild(cancelBtn);
+  footer.appendChild(saveBtn);
+
+  panel.appendChild(header);
+  panel.appendChild(body);
+  panel.appendChild(footer);
+  overlay.appendChild(panel);
+
+  // Close on backdrop click
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  document.body.appendChild(overlay);
+}
+
+function showSidebarToast(message: string): void {
+  const toast = document.createElement('div');
+  toast.textContent = message;
+  toast.style.cssText = `
+    position: fixed;
+    bottom: 32px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--primary-color, #03a9f4);
+    color: white;
+    padding: 10px 24px;
+    border-radius: 24px;
+    z-index: 10000;
+    font-size: 14px;
+    font-weight: 500;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    pointer-events: none;
+    transition: opacity 0.4s;
+  `;
+  document.body.appendChild(toast);
+  setTimeout(() => { toast.style.opacity = '0'; }, 2400);
+  setTimeout(() => toast.remove(), 3000);
+}
+
+// ##########################################################################################
 // ###   Init
 // ##########################################################################################
 
@@ -1585,6 +1783,11 @@ async function buildSidebar() {
     setTimeout(function () {
       updateStyling(appLayout, sidebarConfig);
     }, 1);
+
+    // Edit-mode button: visible only when dashboard is in edit mode
+    sidebar.style.position = 'relative';
+    if (isEditMode()) createEditButton(sidebarConfig, sidebar);
+    watchEditMode(sidebarConfig, sidebar);
   } else {
     log2console('buildSidebar', 'No sidebar in config found!');
   }
