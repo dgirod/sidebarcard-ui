@@ -1655,6 +1655,20 @@ async function openSidebarEditor(currentConfig: any): Promise<void> {
       fullConfig.sidebar = latestConfig;
       await lovelace.saveConfig(fullConfig);
       overlay.remove();
+
+      // Re-apply new config to the live sidebar-card-ui element so changes
+      // are visible immediately without a page reload.
+      const root = getRoot();
+      if (root && root.shadowRoot) {
+        const appLayout = root.shadowRoot.querySelector('div');
+        const sidebarCard: any = appLayout &&
+          appLayout.querySelector('#customSidebarWrapper #customSidebar sidebar-card-ui');
+        if (sidebarCard) {
+          sidebarCard.setConfig(latestConfig);
+          sidebarCard.hass = hass();
+        }
+      }
+
       showSidebarToast('Sidebar gespeichert ✓');
     } catch (err) {
       console.error('sidebar-card: save failed', err);
