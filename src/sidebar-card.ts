@@ -890,18 +890,41 @@ class SidebarCardEditor extends LitElement {
       // Sync current bottomCard config into the editor
       this._syncToCardEditor();
 
-      // Patch hui-card-picker.updated() to suppress the parentElement.shadowRoot crash.
-      // In HA's dialog context, hui-card-picker is a direct child of hui-dialog-edit-card
-      // and its updated() scrolls the dialog's #content element. Outside that context
-      // (our overlay) parentElement has no shadowRoot → null crash.
-      // We patch it as soon as it's defined (may be lazy-imported on first + click).
+      // Patch hui-card-picker to work outside the native HA dialog context.
+      //
+      // Problem 1 – updated() crash:
+      //   updated() calls this.parentElement.shadowRoot.getElementById("content")
+      //   to scroll the dialog. Outside hui-dialog-edit-card parentElement has no
+      //   shadowRoot → TypeError. Fix: wrap in try/catch.
+      //
+      // Problem 2 – firstUpdated() crash → render() returns nothing:
+      //   firstUpdated() calls computeUsedEntities(lovelace) which does
+      //   view.cards.forEach(...) for every view in lovelace.config.views.
+      //   If any view has no 'cards' array (panel view, path-only view, etc.)
+      //   this throws before _unusedEntities and _usedEntities are set.
+      //   render() guards on !this._unusedEntities || !this._usedEntities and
+      //   returns nothing → empty picker. Fix: catch the crash, ensure both
+      //   guard properties are set to [] and call _loadCards() manually.
       const patchCardPicker = () => {
         const pickerCls: any = customElements.get('hui-card-picker');
         if (pickerCls && !pickerCls.__sidebarPatched) {
+          // Patch 1: updated()
           const origUpdated = pickerCls.prototype.updated;
           pickerCls.prototype.updated = function (cp: any) {
             try { origUpdated.call(this, cp); } catch (_e) { /* suppress scroll-to-top error */ }
           };
+
+          // Patch 2: firstUpdated()
+          const origFirstUpdated = pickerCls.prototype.firstUpdated;
+          pickerCls.prototype.firstUpdated = function (cp: any) {
+            try { origFirstUpdated.call(this, cp); } catch (_e) { /* suppress computeUsedEntities crash */ }
+            // Ensure the render() guard properties are always set
+            if (!this._unusedEntities) this._unusedEntities = [];
+            if (!this._usedEntities) this._usedEntities = [];
+            // If _cards wasn't populated (crash before _loadCards call), load now
+            if (!this._cards?.length) this._loadCards?.();
+          };
+
           pickerCls.__sidebarPatched = true;
         }
       };
