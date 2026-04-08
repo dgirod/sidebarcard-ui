@@ -332,10 +332,18 @@ class SidebarCard extends LitElement {
 
     if (this.bottomCard) {
       setTimeout(() => {
-        var card: any = {
-          type: this.bottomCard.type,
-        };
-        card = Object.assign({}, card, this.bottomCard.cardOptions);
+        const bc = this.bottomCard;
+        // Support both formats:
+        // Legacy single-card: { type, cardOptions, cardStyle }
+        // Multi-card:         { cards: [...], cardStyle }
+        var card: any;
+        if (Array.isArray(bc.cards) && bc.cards.length > 0) {
+          // Multi-card → wrap in a vertical-stack
+          card = { type: 'vertical-stack', cards: bc.cards };
+        } else {
+          card = Object.assign({ type: bc.type }, bc.cardOptions);
+        }
+
         log2console('firstUpdated', 'Bottom card: ', card);
         if (!card || typeof card !== 'object' || !card.type) {
           error2console('firstUpdated', 'Bottom card config error!');
@@ -352,8 +360,8 @@ class SidebarCard extends LitElement {
           bottomSection.appendChild(cardElement);
           provideHass(cardElement);
 
-          if (this.bottomCard.cardStyle && this.bottomCard.cardStyle != '') {
-            let style = this.bottomCard.cardStyle;
+          if (bc.cardStyle && bc.cardStyle != '') {
+            let style = bc.cardStyle;
             let itterations = 0;
             let interval = setInterval(function () {
               if (cardElement && cardElement.shadowRoot) {
@@ -717,6 +725,9 @@ class SidebarCardEditor extends LitElement {
   _cardEditorEl: any = null;
   _cardEditorReady: boolean = false;
   _cardEditorLoading: boolean = false;
+  // State for our own card-type picker (shown instead of broken hui-card-picker)
+  _showingCardTypePicker: boolean = false;
+  _pendingCards: any[] = [];
 
   static get properties() {
     return {
@@ -725,6 +736,7 @@ class SidebarCardEditor extends LitElement {
       _activeTab: {},
       _cardEditorReady: {},
       _cardEditorLoading: {},
+      _showingCardTypePicker: {},
     };
   }
 
@@ -791,27 +803,41 @@ class SidebarCardEditor extends LitElement {
   // --- Native HA card editor (vertical-stack-in-card approach) ---
 
   /**
-   * Convert our bottomCard config → vertical-stack cards array
-   * bottomCard: { type, cardOptions: {...}, cardStyle }
-   * HA card:    { type, ...cardOptions }
+   * Convert our bottomCard config → cards array for hui-stack-card-editor.
+   * Supports both legacy single-card format and new multi-card format.
+   * Legacy: { type, cardOptions: {...}, cardStyle }
+   * Multi:  { type: 'vertical-stack', cards: [...], cardStyle }
    */
   private _bottomCardToCards(): any[] {
     const bc = this._config.bottomCard;
-    if (!bc || !bc.type) return [];
-    return [{ type: bc.type, ...(bc.cardOptions || {}) }];
+    if (!bc) return [];
+    // New multi-card format
+    if (Array.isArray(bc.cards) && bc.cards.length > 0) return bc.cards;
+    // Legacy single-card format
+    if (bc.type) return [{ type: bc.type, ...(bc.cardOptions || {}) }];
+    return [];
   }
 
   /**
-   * Convert vertical-stack cards array → our bottomCard config
+   * Convert cards array → our bottomCard config.
+   * 1 card  → legacy format { type, cardOptions, cardStyle } (backward compat)
+   * 2+ cards → multi format { cards: [...], cardStyle }
    * Preserves cardStyle from the existing bottomCard config.
    */
   private _cardsToBottomCard(cards: any[]): any | undefined {
     if (!cards || cards.length === 0) return undefined;
-    const { type, ...rest } = cards[0];
     const existingStyle = this._config.bottomCard?.cardStyle;
+    if (cards.length === 1) {
+      const { type, ...rest } = cards[0];
+      return {
+        type,
+        ...(Object.keys(rest).length > 0 ? { cardOptions: rest } : {}),
+        ...(existingStyle ? { cardStyle: existingStyle } : {}),
+      };
+    }
+    // Multiple cards — store as array
     return {
-      type,
-      ...(Object.keys(rest).length > 0 ? { cardOptions: rest } : {}),
+      cards,
       ...(existingStyle ? { cardStyle: existingStyle } : {}),
     };
   }
@@ -850,6 +876,7 @@ class SidebarCardEditor extends LitElement {
       // Get the standard HA editor element for vertical-stack cards
       this._cardEditorEl = await cls.getConfigElement();
       this._cardEditorEl.hass = this.hass;
+      this._cardEditorEl.lovelace = getLovelace();
 
       // Patch setConfig so the editor only sees the cards array (not our full config)
       const originalSetConfig = this._cardEditorEl.setConfig.bind(this._cardEditorEl);
@@ -863,12 +890,39 @@ class SidebarCardEditor extends LitElement {
       // Sync current bottomCard config into the editor
       this._syncToCardEditor();
 
-      // Listen for card changes and translate back to our bottomCard format
+      // Patch hui-card-picker.updated() to suppress the parentElement.shadowRoot crash.
+      // In HA's dialog context, hui-card-picker is a direct child of hui-dialog-edit-card
+      // and its updated() scrolls the dialog's #content element. Outside that context
+      // (our overlay) parentElement has no shadowRoot → null crash.
+      // We patch it as soon as it's defined (may be lazy-imported on first + click).
+      const patchCardPicker = () => {
+        const pickerCls: any = customElements.get('hui-card-picker');
+        if (pickerCls && !pickerCls.__sidebarPatched) {
+          const origUpdated = pickerCls.prototype.updated;
+          pickerCls.prototype.updated = function (cp: any) {
+            try { origUpdated.call(this, cp); } catch (_e) { /* suppress scroll-to-top error */ }
+          };
+          pickerCls.__sidebarPatched = true;
+        }
+      };
+      // Try immediately (in case already defined) and also watch for future definition
+      patchCardPicker();
+      customElements.whenDefined('hui-card-picker').then(patchCardPicker);
+
+      // Listen for card changes and translate back to our bottomCard format.
+      // When user clicks +, the stack editor adds {type:""} and the native
+      // hui-card-picker renders (crash-safe after our patch above).
+      // We simply skip config updates while any card still has no type —
+      // once the user picks a card type, we get a clean config-changed.
       this._cardEditorEl.addEventListener('config-changed', (e: CustomEvent) => {
         e.stopPropagation();
-        const cards: any[] = e.detail?.config?.cards ?? [];
+        const rawCards: any[] = e.detail?.config?.cards ?? [];
+
+        // While native card picker is showing (empty card present), don't save yet.
+        if (this._deepHasEmptyCard(rawCards)) return;
+
         const newConfig = { ...this._config };
-        const bottomCard = this._cardsToBottomCard(cards);
+        const bottomCard = this._cardsToBottomCard(rawCards);
         if (bottomCard) {
           newConfig.bottomCard = bottomCard;
         } else {
@@ -1009,10 +1063,121 @@ class SidebarCardEditor extends LitElement {
     `;
   }
 
+  /** Recursively check if any card (at any nesting depth) has no type set. */
+  private _deepHasEmptyCard(cards: any[]): boolean {
+    return cards.some((c: any) => {
+      if (!c.type || c.type === '') return true;
+      if (Array.isArray(c.cards)) return this._deepHasEmptyCard(c.cards);
+      return false;
+    });
+  }
+
+  /** Recursively replace the first empty card {type:""} with {type: newType}. */
+  private _deepReplaceEmptyCard(cards: any[], newType: string): any[] {
+    let replaced = false;
+    return cards.map((c: any) => {
+      if (replaced) return c;
+      if (!c.type || c.type === '') {
+        replaced = true;
+        return { type: newType };
+      }
+      if (Array.isArray(c.cards)) {
+        const updatedCards = this._deepReplaceEmptyCard(c.cards, newType);
+        if (updatedCards !== c.cards) replaced = true;
+        return { ...c, cards: updatedCards };
+      }
+      return c;
+    });
+  }
+
+  /** Called when user selects a card type in our own picker overlay */
+  private _addCardOfType(type: string): void {
+    // Deep-replace the empty card placeholder with the selected type
+    const newCards = this._deepReplaceEmptyCard(this._pendingCards, type);
+    this._showingCardTypePicker = false;
+    this._pendingCards = [];
+    const newConfig = { ...this._config };
+    const bottomCard = this._cardsToBottomCard(newCards);
+    if (bottomCard) {
+      newConfig.bottomCard = bottomCard;
+    } else {
+      delete newConfig.bottomCard;
+    }
+    this._config = newConfig;
+    this._fireConfigChanged();
+    // Sync new cards into the stack editor
+    setTimeout(() => this._syncToCardEditor(), 0);
+  }
+
+  /** Renders our simple card-type picker (replaces the broken hui-card-picker) */
+  private _renderCardTypePicker() {
+    const commonTypes = [
+      { type: 'entities', label: 'Entities', icon: 'mdi:format-list-bulleted' },
+      { type: 'entity', label: 'Entity', icon: 'mdi:lightning-bolt' },
+      { type: 'button', label: 'Button', icon: 'mdi:gesture-tap-button' },
+      { type: 'glance', label: 'Glance', icon: 'mdi:view-dashboard' },
+      { type: 'history-graph', label: 'History Graph', icon: 'mdi:chart-line' },
+      { type: 'logbook', label: 'Logbook', icon: 'mdi:math-log' },
+      { type: 'map', label: 'Karte', icon: 'mdi:map' },
+      { type: 'markdown', label: 'Markdown', icon: 'mdi:language-markdown' },
+      { type: 'media-control', label: 'Medien', icon: 'mdi:play-circle' },
+      { type: 'picture', label: 'Bild', icon: 'mdi:image' },
+      { type: 'picture-entity', label: 'Bild-Entity', icon: 'mdi:image-frame' },
+      { type: 'sensor', label: 'Sensor', icon: 'mdi:thermometer' },
+      { type: 'thermostat', label: 'Thermostat', icon: 'mdi:thermostat' },
+      { type: 'tile', label: 'Tile', icon: 'mdi:view-grid' },
+      { type: 'weather-forecast', label: 'Wetter', icon: 'mdi:weather-partly-cloudy' },
+      { type: 'vertical-stack', label: 'Vertical Stack', icon: 'mdi:layers' },
+      { type: 'horizontal-stack', label: 'Horizontal Stack', icon: 'mdi:table-column' },
+      { type: 'custom:button-card', label: 'Button Card', icon: 'mdi:gesture-tap' },
+    ];
+    return html`
+      <div class="card-type-picker">
+        <div class="card-type-picker-header">
+          <span>Kartentyp wählen</span>
+          <button class="picker-close" @click="${() => { this._showingCardTypePicker = false; this._pendingCards = []; }}">✕</button>
+        </div>
+        <div class="card-type-grid">
+          ${commonTypes.map(
+            (ct) => html`
+              <button class="card-type-item" @click="${() => this._addCardOfType(ct.type)}">
+                <ha-icon icon="${ct.icon}"></ha-icon>
+                <span>${ct.label}</span>
+              </button>
+            `
+          )}
+        </div>
+        <div class="card-type-custom">
+          <span>Eigener Typ:</span>
+          <input
+            type="text"
+            class="custom-type-input"
+            placeholder="z.B. custom:my-card"
+            @keydown="${(e: KeyboardEvent) => {
+              if (e.key === 'Enter') {
+                const input = e.target as HTMLInputElement;
+                if (input.value.trim()) this._addCardOfType(input.value.trim());
+              }
+            }}"
+          />
+          <button class="picker-add-btn" @click="${(e: MouseEvent) => {
+            const input = (e.target as HTMLElement).previousElementSibling as HTMLInputElement;
+            if (input?.value?.trim()) this._addCardOfType(input.value.trim());
+          }}">Hinzufügen</button>
+        </div>
+      </div>
+    `;
+  }
+
   private _renderBottomCardTab() {
     // Lazily load the HA card editor on first visit
     if (!this._cardEditorReady && !this._cardEditorLoading) {
       this._initCardEditor();
+    }
+
+    // Show our own card type picker (intercepted from hui-card-picker crash)
+    if (this._showingCardTypePicker) {
+      return this._renderCardTypePicker();
     }
 
     return html`
@@ -1169,6 +1334,84 @@ class SidebarCardEditor extends LitElement {
       #card-editor-slot {
         display: block;
       }
+
+      /* ---- Card type picker (own implementation, bypasses broken hui-card-picker) ---- */
+      .card-type-picker {
+        border: 1px solid var(--divider-color, rgba(0,0,0,0.12));
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .card-type-picker-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 14px;
+        background: var(--secondary-background-color, #f5f5f5);
+        font-weight: 500;
+        font-size: 14px;
+      }
+      .picker-close {
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: var(--secondary-text-color, #727272);
+        font-size: 16px;
+        padding: 2px 6px;
+        border-radius: 4px;
+      }
+      .picker-close:hover { background: var(--divider-color, rgba(0,0,0,0.08)); }
+      .card-type-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1px;
+        background: var(--divider-color, rgba(0,0,0,0.12));
+      }
+      .card-type-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        padding: 10px 6px;
+        background: var(--card-background-color, #fff);
+        border: none;
+        cursor: pointer;
+        font-size: 11px;
+        color: var(--primary-text-color, #212121);
+        transition: background 0.15s;
+      }
+      .card-type-item:hover { background: var(--secondary-background-color, #f5f5f5); }
+      .card-type-item ha-icon { --mdc-icon-size: 20px; color: var(--primary-color, #03a9f4); }
+      .card-type-custom {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        background: var(--secondary-background-color, #f5f5f5);
+        font-size: 13px;
+        flex-wrap: wrap;
+      }
+      .custom-type-input {
+        flex: 1;
+        min-width: 120px;
+        border: 1px solid var(--divider-color, rgba(0,0,0,0.2));
+        border-radius: 4px;
+        padding: 4px 8px;
+        font-size: 13px;
+        background: var(--card-background-color, #fff);
+        color: var(--primary-text-color, #212121);
+      }
+      .picker-add-btn {
+        background: var(--primary-color, #03a9f4);
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        padding: 5px 12px;
+        cursor: pointer;
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      .picker-add-btn:hover { opacity: 0.9; }
+
       .card-editor-info {
         font-size: 13px;
         color: var(--secondary-text-color, #727272);
@@ -1689,7 +1932,12 @@ async function openSidebarEditor(currentConfig: any): Promise<void> {
     if (e.target === overlay) overlay.remove();
   });
 
-  document.body.appendChild(overlay);
+  // Attach overlay inside home-assistant shadow root so that show-dialog
+  // events fired by card-editor sub-components can bubble up to the HA
+  // dialog manager (which lives inside home-assistant's shadow tree).
+  // Falling back to document.body if shadow root is not accessible.
+  const haShadow = (document.querySelector('home-assistant') as any)?.shadowRoot as ShadowRoot | null;
+  (haShadow || document.body).appendChild(overlay);
 }
 
 function showSidebarToast(message: string): void {
